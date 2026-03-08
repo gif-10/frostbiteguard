@@ -1,53 +1,22 @@
 import { useState, useEffect } from "react";
-import { Thermometer, Wind, AlertTriangle, Snowflake, MapPin, Loader2, CloudSnow, RefreshCw } from "lucide-react";
+import { Thermometer, Wind, AlertTriangle, Snowflake, MapPin, Loader2, CloudSnow, RefreshCw, Navigation } from "lucide-react";
 import { calculateWindChill, getRiskLevel, getRiskInfo, getClothingRecommendations, type RiskLevel } from "@/lib/weather";
+import { fetchOpenMeteo, getWeatherDescription } from "@/lib/geocoding";
+import CitySearch from "./CitySearch";
 import { toast } from "sonner";
-
-interface OpenMeteoData {
-  temperature: number;
-  windSpeed: number;
-  weatherCode: number;
-}
-
-function getWeatherDescription(code: number): string {
-  const descriptions: Record<number, string> = {
-    0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-    45: "Foggy", 48: "Depositing rime fog",
-    51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
-    61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
-    71: "Slight snowfall", 73: "Moderate snowfall", 75: "Heavy snowfall",
-    77: "Snow grains", 80: "Slight rain showers", 81: "Moderate rain showers",
-    85: "Slight snow showers", 86: "Heavy snow showers",
-    95: "Thunderstorm", 96: "Thunderstorm with hail",
-  };
-  return descriptions[code] || "Unknown";
-}
-
-async function fetchOpenMeteo(lat: number, lon: number): Promise<OpenMeteoData> {
-  const res = await fetch(
-    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,wind_speed_10m,weather_code`
-  );
-  if (!res.ok) throw new Error("Failed to fetch weather data");
-  const data = await res.json();
-  return {
-    temperature: Math.round(data.current.temperature_2m * 10) / 10,
-    windSpeed: Math.round(data.current.wind_speed_10m * 10) / 10,
-    weatherCode: data.current.weather_code,
-  };
-}
 
 const RiskChecker = () => {
   const [temperature, setTemperature] = useState("");
   const [windSpeed, setWindSpeed] = useState("");
   const [weatherDesc, setWeatherDesc] = useState("");
+  const [cityName, setCityName] = useState("");
   const [result, setResult] = useState<{ windChill: number; riskLevel: RiskLevel } | null>(null);
   const [location, setLocation] = useState<{ lat: number; lon: number } | null>(null);
   const [locationLoading, setLocationLoading] = useState(false);
-  const [locationError, setLocationError] = useState("");
   const [weatherLoading, setWeatherLoading] = useState(false);
   const [autoFetched, setAutoFetched] = useState(false);
 
-  const fetchWeatherForLocation = async (lat: number, lon: number) => {
+  const fetchWeatherForLocation = async (lat: number, lon: number, name?: string) => {
     setWeatherLoading(true);
     try {
       const data = await fetchOpenMeteo(lat, lon);
@@ -55,7 +24,8 @@ const RiskChecker = () => {
       setWindSpeed(String(data.windSpeed));
       setWeatherDesc(getWeatherDescription(data.weatherCode));
       setAutoFetched(true);
-      toast.success("Real-time weather data loaded from Open-Meteo!");
+      if (name) setCityName(name);
+      toast.success(`Weather data loaded${name ? ` for ${name}` : ""}!`);
     } catch {
       toast.error("Could not fetch weather data. Enter values manually.");
     } finally {
@@ -63,12 +33,13 @@ const RiskChecker = () => {
     }
   };
 
-  useEffect(() => {
+  const handleUseMyLocation = () => {
     if (!navigator.geolocation) {
-      setLocationError("Geolocation is not supported by your browser.");
+      toast.error("Geolocation is not supported by your browser.");
       return;
     }
     setLocationLoading(true);
+    setCityName("");
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const lat = Math.round(pos.coords.latitude * 10000) / 10000;
@@ -78,11 +49,18 @@ const RiskChecker = () => {
         fetchWeatherForLocation(lat, lon);
       },
       () => {
-        setLocationError("Location access denied. Enter values manually.");
+        toast.error("Location access denied. Search a city or enter values manually.");
         setLocationLoading(false);
       }
     );
-  }, []);
+  };
+
+  const handleCitySelect = (r: { name: string; country: string; latitude: number; longitude: number }) => {
+    const lat = Math.round(r.latitude * 10000) / 10000;
+    const lon = Math.round(r.longitude * 10000) / 10000;
+    setLocation({ lat, lon });
+    fetchWeatherForLocation(lat, lon, `${r.name}, ${r.country}`);
+  };
 
   const handleCheck = () => {
     const temp = parseFloat(temperature);
@@ -104,7 +82,7 @@ const RiskChecker = () => {
   };
 
   const handleRefresh = () => {
-    if (location) fetchWeatherForLocation(location.lat, location.lon);
+    if (location) fetchWeatherForLocation(location.lat, location.lon, cityName || undefined);
   };
 
   const riskInfo = result ? getRiskInfo(result.riskLevel) : null;
@@ -115,30 +93,51 @@ const RiskChecker = () => {
       <div className="container mx-auto px-4">
         <div className="text-center mb-12">
           <h2 className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-3">Frostbite Risk Checker</h2>
-          <p className="text-muted-foreground max-w-xl mx-auto mb-4">
-            Automatically detects your location and fetches real-time weather data, or enter values manually.
+          <p className="text-muted-foreground max-w-xl mx-auto mb-6">
+            Use your location, search any city worldwide, or enter values manually.
           </p>
-          {/* Location Display */}
-          <div className="inline-flex items-center gap-2 rounded-full bg-secondary border border-border px-4 py-2 text-sm text-muted-foreground">
-            <MapPin className="h-4 w-4 text-primary" />
-            {locationLoading ? (
-              <span className="flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin" /> Detecting location...</span>
-            ) : location ? (
-              <span>Your location: <span className="font-medium text-foreground">{location.lat}°, {location.lon}°</span></span>
-            ) : (
-              <span>{locationError || "Location unavailable"}</span>
-            )}
-          </div>
+
+          {/* Location display */}
+          {location && (
+            <div className="inline-flex items-center gap-2 rounded-full bg-secondary border border-border px-4 py-2 text-sm text-muted-foreground">
+              <MapPin className="h-4 w-4 text-primary" />
+              <span>
+                {cityName ? <span className="font-medium text-foreground">{cityName}</span> : null}
+                {" "}
+                <span className="text-muted-foreground">({location.lat}°, {location.lon}°)</span>
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Input Form */}
         <div className="max-w-md mx-auto frost-glass rounded-2xl p-6 sm:p-8 mb-8">
+          {/* Location options */}
+          <div className="space-y-3 mb-6">
+            <button
+              onClick={handleUseMyLocation}
+              disabled={locationLoading || weatherLoading}
+              className="w-full rounded-lg bg-secondary border border-border px-4 py-2.5 text-sm font-medium text-foreground hover:bg-secondary/80 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {locationLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Navigation className="h-4 w-4 text-primary" />}
+              Use My Location
+            </button>
+
+            <div className="flex items-center gap-3">
+              <div className="h-px flex-1 bg-border" />
+              <span className="text-xs text-muted-foreground">or</span>
+              <div className="h-px flex-1 bg-border" />
+            </div>
+
+            <CitySearch onSelect={handleCitySelect} loading={weatherLoading} />
+          </div>
+
           {/* Auto-fetched banner */}
           {autoFetched && weatherDesc && (
             <div className="flex items-center gap-2 rounded-lg bg-primary/10 border border-primary/20 p-3 mb-4 text-sm">
               <CloudSnow className="h-4 w-4 text-primary flex-shrink-0" />
               <span className="text-foreground">
-                Live weather: <span className="font-medium">{weatherDesc}</span>
+                Live: <span className="font-medium">{weatherDesc}</span>
               </span>
               <button onClick={handleRefresh} disabled={weatherLoading} className="ml-auto text-primary hover:text-primary/80 transition-colors">
                 <RefreshCw className={`h-4 w-4 ${weatherLoading ? "animate-spin" : ""}`} />
@@ -222,7 +221,15 @@ const RiskChecker = () => {
                 ))}
               </div>
 
-              <p className="mt-6 text-sm text-muted-foreground">{riskInfo.description}</p>
+              {location && (
+                <div className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+                  <MapPin className="h-3.5 w-3.5" />
+                  {cityName && <span className="font-medium text-foreground">{cityName} · </span>}
+                  {location.lat}°, {location.lon}°
+                </div>
+              )}
+
+              <p className="mt-4 text-sm text-muted-foreground">{riskInfo.description}</p>
             </div>
 
             {clothing.length > 0 && (
